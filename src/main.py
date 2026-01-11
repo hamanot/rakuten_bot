@@ -1,233 +1,148 @@
 import os
-import pickle
-import time
-import uuid
-import base64
-import sys
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import NoSuchElementException, TimeoutException, NoAlertPresentException
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 import tkinter as tk
-from tkinter import simpledialog
-from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
-# ================= 構成設定 =================
-DEBUG_MODE = True  # 【デバッグ時: True / 本番: False】
-TARGET_URL = "https://item.rakuten.co.jp/goodgoods-center/3dsuru/"  # デバッグしたい商品URL
-
-base_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(base_dir)
-DRIVER_PATH = os.path.join(project_root, "bin", "chromedriver.exe")
-CONF_DIR = os.path.join(project_root, "conf")
-COOKIE_FILE = os.path.join(CONF_DIR, "cookies.pkl")
-USER_INFO_FILE = os.path.join(CONF_DIR, "user_info.bin")
-
-if not os.path.exists(CONF_DIR):
-    os.makedirs(CONF_DIR)
+from tkinter import ttk, messagebox
+from ui.user_config import UserConfigDialog
 
 
-# ================= 関数定義 =================
-
-def setup_driver():
+class TopMenu(tk.Tk):
     """
-    Selenium WebDriverの初期化とBot検知回避設定を行う。
-
-    Returns:
-        webdriver.Chrome: 設定済みのChromeドライバインスタンス
+    アプリケーションのメインメニュー（司令塔）。
+    各設定ダイアログの呼び出しと、購入スクリプトの実行制御を行う。
+    Python 3.6 (Windows) の Tcl/Tk 互換性のため、絵文字は使用しない。
     """
-    options = webdriver.ChromeOptions()
-    options.add_experimental_option('w3c', True)
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
-    options.add_argument(
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
 
-    driver = webdriver.Chrome(executable_path=DRIVER_PATH, options=options)
+    def __init__(self):
+        """
+        トップメニューの初期化、ウィンドウ設定、パスの設定を行う。
+        """
+        super().__init__()
+        self.title("Rakuten Bot Manager")
+        self.geometry("400x520")
+        self.minsize(380, 500)
 
-    # navigator.webdriverフラグを消去
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    })
-    return driver
+        # プロジェクトルートと設定ディレクトリのパスを自動解決
+        # rakuten_bot/src/ui/top_menu.py から見て ../../conf
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.conf_dir = os.path.join(base_dir, "conf")
 
+        if not os.path.exists(self.conf_dir):
+            os.makedirs(self.conf_dir)
 
-def save_cookies(driver):
-    """
-    現在のブラウザセッションからCookieを取得し、ファイルに保存する。
-    """
-    with open(COOKIE_FILE, "wb") as f:
-        pickle.dump(driver.get_cookies(), f)
-    print(f">> Cookieを保存しました: {COOKIE_FILE}")
+        # main.pyに引き渡すための設定情報
+        self.result = {
+            "is_start": False,
+            "debug_mode": tk.BooleanVar(value=True)
+        }
 
+        self._create_widgets()
 
-def load_cookies(driver):
-    """
-    保存済みのCookieファイルを読み込み、ブラウザに適用する。
-    """
-    if os.path.exists(COOKIE_FILE):
-        driver.get('https://www.rakuten.co.jp/')
-        with open(COOKIE_FILE, "rb") as f:
-            cookies = pickle.load(f)
-            for cookie in cookies:
-                try:
-                    driver.add_cookie(cookie)
-                except Exception as e:
-                    print(f"Cookie設定エラー: {e}")
-        print(f">> {COOKIE_FILE} からCookieを読み込みました。")
-    else:
-        print(">> Cookieファイルが見つかりません。")
-        driver.get('https://www.rakuten.co.jp/')
+    def _create_widgets(self):
+        """
+        UIコンポーネントを配置する。
+        """
+        container = ttk.Frame(self, padding="20")
+        container.pack(fill=tk.BOTH, expand=True)
 
+        # --- ヘッダー ---
+        ttk.Label(
+            container,
+            text="楽天自動購入マネージャー",
+            font=("Helvetica", 14, "bold")
+        ).pack(pady=(0, 20))
 
-def get_mac_key():
-    """MACアドレスベースの暗号化キー生成"""
-    mac = str(uuid.getnode())
-    salt = b'rakuten_bot_salt'
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
-    return base64.urlsafe_b64encode(kdf.derive(mac.encode()))
+        # --- 動作モード設定エリア ---
+        debug_frame = ttk.LabelFrame(container, text="動作モード設定", padding="10")
+        debug_frame.pack(fill=tk.X, pady=(0, 15))
 
+        ttk.Checkbutton(
+            debug_frame,
+            text="デバッグモード (ログイン処理をスキップ)",
+            variable=self.result["debug_mode"]
+        ).pack(anchor=tk.W)
 
-def get_user_input():
-    """GUIダイアログでID/PASS取得"""
-    root = tk.Tk()
-    root.withdraw()
-    user_id = simpledialog.askstring("設定", "楽天ユーザーIDを入力してください")
-    if not user_id: return None, None
-    password = simpledialog.askstring("設定", "楽天パスワードを入力してください", show='*')
-    return user_id, password
+        # --- 各種設定ボタンエリア ---
+        menu_frame = ttk.LabelFrame(container, text="各種設定メニュー", padding="10")
+        menu_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
 
+        # Python 3.6 の TclError 回避のためテキストのみで構成
+        ttk.Button(
+            menu_frame,
+            text="ユーザー情報設定 (ID/PASS)",
+            command=self._open_user_config
+        ).pack(fill=tk.X, pady=5)
 
-def save_user_info(user_id, password):
-    """ユーザー情報を暗号化保存"""
-    key = get_mac_key()
-    f = Fernet(key)
-    data = f"{user_id}:{password}".encode()
-    with open(USER_INFO_FILE, "wb") as file:
-        file.write(f.encrypt(data))
+        ttk.Button(
+            menu_frame,
+            text="購入ページ情報設定 (URL/時刻)",
+            command=self._open_item_config
+        ).pack(fill=tk.X, pady=5)
 
+        ttk.Button(
+            menu_frame,
+            text="環境情報設定 (ドライバ/パス)",
+            command=self._open_env_config
+        ).pack(fill=tk.X, pady=5)
 
-def load_user_info():
-    """ユーザー情報を復号取得。失敗時は入力を促す"""
-    key = get_mac_key()
-    f = Fernet(key)
-    if os.path.exists(USER_INFO_FILE):
-        try:
-            with open(USER_INFO_FILE, "rb") as file:
-                data = f.decrypt(file.read()).decode()
-            return data.split(":")
-        except Exception:
-            print(">> 復号失敗。再設定します。")
+        ttk.Button(
+            menu_frame,
+            text="試験メニュー (デバッグ用)",
+            command=self._open_test_menu
+        ).pack(fill=tk.X, pady=5)
 
-    u, p = get_user_input()
-    if u and p:
-        save_user_info(u, p)
-        return u, p
-    return None, None
+        # --- 実行・終了ボタンエリア ---
+        action_frame = ttk.Frame(container)
+        action_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
 
+        # 終了ボタン
+        ttk.Button(
+            action_frame,
+            text="終了",
+            command=self.destroy
+        ).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
-def is_logged_in(driver):
-    """ログイン状態の判定"""
-    try:
-        xpath = "//a[@aria-label='ログイン' or contains(., 'ログイン')]"
-        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, xpath)))
-        return False
-    except TimeoutException:
-        return True
+        # 開始ボタン
+        self.start_btn = ttk.Button(
+            action_frame,
+            text="スクリプト開始",
+            command=self._on_start_click
+        )
+        self.start_btn.pack(side=tk.RIGHT, padx=5, expand=True, fill=tk.X)
 
+    def _open_user_config(self):
+        """
+        ユーザー情報設定ダイアログを起動する。
+        """
+        UserConfigDialog(self, self.conf_dir)
 
-def perform_login(driver, user_id, password):
-    """ログインページでのログイン実行"""
-    print(">> ログイン実行中...")
-    driver.get("https://grp01.id.rakuten.co.jp/rms/nid/vc?__event=login&service_id=top")
-    try:
-        wait = WebDriverWait(driver, 10)
-        u_input = wait.until(EC.presence_of_element_located((By.ID, "loginInner_u")))
-        u_input.send_keys(user_id)
-        p_input = driver.find_element(By.ID, "loginInner_p")
-        p_input.send_keys(password + Keys.RETURN)
-        time.sleep(5)
-        driver.get("https://www.rakuten.co.jp/")
-        if is_logged_in(driver):
-            save_cookies(driver)
-            return True
-        return False
-    except Exception as e:
-        print(f">> ログインエラー: {e}")
-        return False
+    def _open_item_config(self):
+        """
+        購入ページ情報設定ダイアログを起動する（今後作成予定）。
+        """
+        messagebox.showinfo("設定", "ItemConfigDialogを表示します（準備中）")
 
+    def _open_env_config(self):
+        """
+        環境情報設定ダイアログを起動する（今後作成予定）。
+        """
+        messagebox.showinfo("設定", "EnvConfigDialogを表示します（準備中）")
 
-def check_for_option_alert(driver):
-    """
-    未選択によるアラートポップアップが出ているか確認し、あれば閉じる。
+    def _open_test_menu(self):
+        """
+        試験メニューダイアログを起動する（今後作成予定）。
+        """
+        messagebox.showinfo("試験", "TestMenuDialogを表示します（準備中）")
 
-    Returns:
-        bool: アラートがあった場合はTrue、なければFalse
-    """
-    try:
-        alert = driver.switch_to.alert
-        alert_text = alert.text
-        print(f">> [警告ポップアップ] {alert_text}")
-        alert.accept()
-        return True
-    except NoAlertPresentException:
-        return False
-
-
-def main():
-    """
-    メイン実行フロー。
-    DEBUG_MODE に応じてログインを制御する。
-    """
-    driver = None
-    try:
-        # 1. ユーザー情報準備
-        user_id, password = load_user_info()
-        if not user_id: return False
-
-        # 2. ブラウザ起動
-        driver = setup_driver()
-
-        # 3. ログイン分岐
-        if DEBUG_MODE:
-            print(">> [DEBUG MODE] ログインをスキップして商品ページへ。")
-            driver.get(TARGET_URL)
-        else:
-            load_cookies(driver)
-            driver.refresh()
-            if not is_logged_in(driver):
-                if not perform_login(driver, user_id, password):
-                    print(">> ログイン失敗。")
-                    return False
-            driver.get(TARGET_URL)
-
-        # 4. 商品ページ解析（デバッグポイント）
-        print(f">> 解析対象: {driver.title}")
-
-        # --- ここにカート追加ボタンのクリックや選択肢操作を記述 ---
-        # 動作確認例：
-        # if check_for_option_alert(driver):
-        #     print(">> 選択項目が不足しています。")
-
-        if DEBUG_MODE:
-            input(">> [DEBUG] 画面を確認してください。Enterで終了します...")
-        else:
-            time.sleep(5)
-
-        return True
-
-    except Exception as e:
-        print(f">> エラー発生: {e}")
-        return False
-    finally:
-        if driver:
-            driver.quit()
+    def _on_start_click(self):
+        """
+        スクリプト開始ボタン押下時の処理。
+        """
+        if messagebox.askyesno("確認", "自動購入処理を開始してよろしいですか？"):
+            self.result["is_start"] = True
+            self.destroy()
 
 
 if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+    # モジュール単体テスト用の起動処理
+    # 親ディレクトリをパスに追加して実行する必要がある場合があります
+    app = TopMenu()
+    app.mainloop()
