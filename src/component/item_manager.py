@@ -1,30 +1,65 @@
-import os
 import json
+import os
+
 
 class ItemManager:
-    def __init__(self, conf_dir):
-        self.conf_dir = conf_dir
-        self.file_path = os.path.join(conf_dir, "item_info.json")
-        self.default_data = {
-            "common": {"top_url": "https://www.rakuten.co.jp/", "login_url": "https://login.rakuten.co.jp/rid/login/"},
-            "items": [{"item_url": "", "details": [], "notes": []}]
+    def __init__(self, debug_mode=True):
+        self.debug_mode = debug_mode
+        current_file = os.path.abspath(__file__)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+
+        self.conf_dir = os.path.join(project_root, "conf")
+        # デバッグモードを判定してファイル名を決定
+        filename = "item_info_debug.json" if self.debug_mode else "item_info.json"
+        self.file_path = os.path.join(self.conf_dir, filename)
+
+        self.item_data = {
+            "common": {"top_url": "", "login_url": "", "cart_url": ""},
+            "items": [{"item_url": "", "required_keywords": [], "actions": []}]
         }
 
-    def save(self, data):
-        with open(self.file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-
     def load(self):
-        if not os.path.exists(self.file_path): return self.default_data
+        if not os.path.exists(self.file_path):
+            return self.item_data
+
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if "items" not in data: # 互換性維持
-                    data = {"common": data.get("common", self.default_data["common"]), "items": [data.get("individual", {})]}
-                return data
-        except: return self.default_data
+
+            if "common" not in data:
+                data["common"] = self.item_data["common"]
+            for k in ["top_url", "login_url", "cart_url"]:
+                if k not in data["common"]:
+                    data["common"][k] = ""
+
+            if "items" not in data or not data["items"]:
+                data["items"] = self.item_data["items"]
+
+            self.item_data = data
+            return self.item_data
+        except:
+            return self.item_data
+
+    def save(self, data):
+        self.item_data = data
+        try:
+            if not os.path.exists(self.conf_dir):
+                os.makedirs(self.conf_dir, exist_ok=True)
+            with open(self.file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            return True
+        except:
+            return False
 
     def is_valid(self):
         data = self.load()
+        c = data.get("common", {})
         items = data.get("items", [])
-        return len(items) > 0 and bool(items[0].get("item_url"))
+        i = items[0] if items else {}
+
+        return all([
+            c.get("top_url", "").strip(),
+            c.get("login_url", "").strip(),
+            c.get("cart_url", "").strip(),
+            i.get("item_url", "").strip()
+        ])

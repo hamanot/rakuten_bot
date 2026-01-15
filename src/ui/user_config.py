@@ -1,36 +1,56 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import os, sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ui.base_dialog import BaseDialog
+# 新しいベースクラスをインポート
+from ui.base_sub_dialog import BaseSubDialog
 from component.user_manager import UserManager
 
-
-class UserConfigDialog(BaseDialog):
+class UserConfigDialog(BaseSubDialog):
     def __init__(self, parent):
-        super().__init__(parent, title="ユーザー情報設定", size="400x300")
-        self.manager = UserManager(self.conf_dir)
-        self.id_var = tk.StringVar()
-        self.pass_var = tk.StringVar()
+        # 1. BaseSubDialogの初期化（Toplevelとしての初期化とBaseDialogのロジックが走る）
+        super().__init__(parent, title="ユーザー設定 (暗号化保存)", size="400x320")
 
-        u, p = self.manager.load()
-        if u: self.id_var.set(u); self.pass_var.set(p)
+        # 2. データの準備
+        self.manager = UserManager()
+        self.current_data = self.manager.load()
+
+        # 3. UI作成メソッドを実行
         self._create_widgets()
 
-    def _create_widgets(self):
-        c = self.create_container()
-        ttk.Label(c, text="楽天ID:").pack(anchor="w")
-        ttk.Entry(c, textvariable=self.id_var).pack(fill="x", pady=(0, 10))
-        ttk.Label(c, text="パスワード:").pack(anchor="w")
-        ttk.Entry(c, textvariable=self.pass_var, show="*").pack(fill="x", pady=(0, 20))
+        # 4. コンテンツに合わせてサイズを自動調整（BaseDialogのメソッド）
+        self.adjust_to_content(width=400)
 
-        btn_f = ttk.Frame(c)
-        btn_f.pack(fill="x")
-        ttk.Button(btn_f, text="保存", command=self._save).pack(side="right", padx=5)
-        ttk.Button(btn_f, text="閉じる", command=self.close_dialog).pack(side="right")
+    def _create_widgets(self):
+        # BaseDialogのメソッドでスクロール可能な土台を作る
+        self.scroll_f = self.create_scrollable_container()
+
+        # 変数作成（Entryに紐付けるStringVar）
+        self.id_var = tk.StringVar(value=self.current_data.get("rakuten_id", ""))
+        self.pw_var = tk.StringVar(value=self.current_data.get("rakuten_pw", ""))
+
+        # --- ユーザー設定用フレーム ---
+        main_f = ttk.LabelFrame(self.scroll_f, text=" ログイン情報 ", padding="15")
+        main_f.pack(fill="x", pady=10, padx=15)
+
+        ttk.Label(main_f, text="楽天ユーザID:").pack(anchor="w")
+        ttk.Entry(main_f, textvariable=self.id_var).pack(fill="x", pady=(0, 10))
+
+        ttk.Label(main_f, text="パスワード:").pack(anchor="w")
+        ttk.Entry(main_f, textvariable=self.pw_var, show="*").pack(fill="x", pady=(0, 10))
+
+        # ボタンエリア
+        btn_area = ttk.Frame(self.scroll_f)
+        btn_area.pack(pady=20)
+        ttk.Button(btn_area, text="保存", width=12, command=self._save).pack(side="left", padx=10)
+        ttk.Button(btn_area, text="キャンセル", width=12, command=self.close_dialog).pack(side="left", padx=10)
 
     def _save(self):
-        self.manager.save(self.id_var.get(), self.pass_var.get())
-        messagebox.showinfo("完了", "保存しました")
-        self.close_dialog()
+        new_data = {
+            "rakuten_id": self.id_var.get().strip(),
+            "rakuten_pw": self.pw_var.get().strip()
+        }
+        if self.manager.save(new_data):
+            messagebox.showinfo("成功", "設定を保存しました。")
+            self.close_dialog()
+
+    # close_dialog は BaseSubDialog で定義されているため、
+    # 特殊な追加処理がなければ記述不要（自動で親のメソッドが使われる）

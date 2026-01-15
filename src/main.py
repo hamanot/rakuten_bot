@@ -1,148 +1,92 @@
-import os
-import tkinter as tk
-from tkinter import ttk, messagebox
-from ui.user_config import UserConfigDialog
+import sys, os
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from ui.top_menu import TopMenu
+from bl.purchase_logic import PurchaseLogic
+from ui.debug_controller import DebugController
 
 
-class TopMenu(tk.Tk):
-    """
-    アプリケーションのメインメニュー（司令塔）。
-    各設定ダイアログの呼び出しと、購入スクリプトの実行制御を行う。
-    Python 3.6 (Windows) の Tcl/Tk 互換性のため、絵文字は使用しない。
-    """
+def main():
+    # 1. 初期メニュー起動
+    menu = TopMenu()
+    menu.mainloop()
+    if not menu.result["is_start"]: return
 
-    def __init__(self):
-        """
-        トップメニューの初期化、ウィンドウ設定、パスの設定を行う。
-        """
-        super().__init__()
-        self.title("Rakuten Bot Manager")
-        self.geometry("400x520")
-        self.minsize(380, 500)
+    is_debug = menu.result["debug_mode"].get()
 
-        # プロジェクトルートと設定ディレクトリのパスを自動解決
-        # rakuten_bot/src/ui/top_menu.py から見て ../../conf
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        self.conf_dir = os.path.join(base_dir, "conf")
+    # 2. パス計算 (rakuten_bot/bin/chromedriver.exe)
+    current_file = os.path.abspath(__file__)
+    src_dir = os.path.dirname(current_file)
+    project_root = os.path.dirname(src_dir)
+    driver_path = os.path.join(project_root, "bin", "chromedriver.exe")
 
-        if not os.path.exists(self.conf_dir):
-            os.makedirs(self.conf_dir)
+    if not os.path.exists(driver_path):
+        import tkinter.messagebox as mb
+        mb.showerror("エラー", f"ChromeDriverが見つかりません:\n{driver_path}")
+        return
 
-        # main.pyに引き渡すための設定情報
-        self.result = {
-            "is_start": False,
-            "debug_mode": tk.BooleanVar(value=True)
-        }
+    # 3. ブラウザ設定（おまじない）
+    options = Options()
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_argument(
+        'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    options.add_argument('--lang=ja-JP')
 
-        self._create_widgets()
+    try:
+        driver = webdriver.Chrome(executable_path=driver_path, options=options)
+    except TypeError:
+        from selenium.webdriver.chrome.service import Service
+        service = Service(executable_path=driver_path)
+        driver = webdriver.Chrome(service=service, options=options)
 
-    def _create_widgets(self):
-        """
-        UIコンポーネントを配置する。
-        """
-        container = ttk.Frame(self, padding="20")
-        container.pack(fill=tk.BOTH, expand=True)
+    # navigator.webdriver隠蔽
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    })
 
-        # --- ヘッダー ---
-        ttk.Label(
-            container,
-            text="楽天自動購入マネージャー",
-            font=("Helvetica", 14, "bold")
-        ).pack(pady=(0, 20))
+    try:
+        # 4. ロジック初期化 (設定読み込みは Logic 内部で行われる)
+        logic = PurchaseLogic(driver, debug_mode=is_debug)
 
-        # --- 動作モード設定エリア ---
-        debug_frame = ttk.LabelFrame(container, text="動作モード設定", padding="10")
-        debug_frame.pack(fill=tk.X, pady=(0, 15))
+        # 商品ページへ
+        driver.get(logic.item.get("item_url"))
 
-        ttk.Checkbutton(
-            debug_frame,
-            text="デバッグモード (ログイン処理をスキップ)",
-            variable=self.result["debug_mode"]
-        ).pack(anchor=tk.W)
+        if not is_debug:
+            # --- 本番モード ---
+            logic.load_cookies()
+            driver.refresh()
 
-        # --- 各種設定ボタンエリア ---
-        menu_frame = ttk.LabelFrame(container, text="各種設定メニュー", padding="10")
-        menu_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+            if not logic.is_logged_in():
+                # execute_login 内部で login_url への get を行う
+                logic.execute_login()
 
-        # Python 3.6 の TclError 回避のためテキストのみで構成
-        ttk.Button(
-            menu_frame,
-            text="ユーザー情報設定 (ID/PASS)",
-            command=self._open_user_config
-        ).pack(fill=tk.X, pady=5)
+            actions = logic.item.get("actions", [])
+            for i, a_set in enumerate(actions):
+                logic.select_required_options(logic.item.get("required_keywords", []))
+                logic.execute_action_set(a_set)
+                logic.add_to_cart()
+                if i < len(actions) - 1:
+                    driver.get(logic.item.get("item_url"))
 
-        ttk.Button(
-            menu_frame,
-            text="購入ページ情報設定 (URL/時刻)",
-            command=self._open_item_config
-        ).pack(fill=tk.X, pady=5)
+            logic.go_to_checkout()
+        else:
+            # --- デバッグモード ---
+            # コントローラー起動
+            ctrl = DebugController(driver, logic, logic.item)
+            # 新しいメインウィンドウとしてイベントループを開始する
+            ctrl.mainloop()
 
-        ttk.Button(
-            menu_frame,
-            text="環境情報設定 (ドライバ/パス)",
-            command=self._open_env_config
-        ).pack(fill=tk.X, pady=5)
+    except Exception as e:
+        print(f"実行エラー: {e}")
 
-        ttk.Button(
-            menu_frame,
-            text="試験メニュー (デバッグ用)",
-            command=self._open_test_menu
-        ).pack(fill=tk.X, pady=5)
-
-        # --- 実行・終了ボタンエリア ---
-        action_frame = ttk.Frame(container)
-        action_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(10, 0))
-
-        # 終了ボタン
-        ttk.Button(
-            action_frame,
-            text="終了",
-            command=self.destroy
-        ).pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
-
-        # 開始ボタン
-        self.start_btn = ttk.Button(
-            action_frame,
-            text="スクリプト開始",
-            command=self._on_start_click
-        )
-        self.start_btn.pack(side=tk.RIGHT, padx=5, expand=True, fill=tk.X)
-
-    def _open_user_config(self):
-        """
-        ユーザー情報設定ダイアログを起動する。
-        """
-        UserConfigDialog(self, self.conf_dir)
-
-    def _open_item_config(self):
-        """
-        購入ページ情報設定ダイアログを起動する（今後作成予定）。
-        """
-        messagebox.showinfo("設定", "ItemConfigDialogを表示します（準備中）")
-
-    def _open_env_config(self):
-        """
-        環境情報設定ダイアログを起動する（今後作成予定）。
-        """
-        messagebox.showinfo("設定", "EnvConfigDialogを表示します（準備中）")
-
-    def _open_test_menu(self):
-        """
-        試験メニューダイアログを起動する（今後作成予定）。
-        """
-        messagebox.showinfo("試験", "TestMenuDialogを表示します（準備中）")
-
-    def _on_start_click(self):
-        """
-        スクリプト開始ボタン押下時の処理。
-        """
-        if messagebox.askyesno("確認", "自動購入処理を開始してよろしいですか？"):
-            self.result["is_start"] = True
-            self.destroy()
+    finally:
+        # ★ ここを追加：プログラムが終わる時に必ずブラウザを閉じる
+        if 'driver' in locals():
+            print("ブラウザを終了します...")
+            driver.quit()
 
 
 if __name__ == "__main__":
-    # モジュール単体テスト用の起動処理
-    # 親ディレクトリをパスに追加して実行する必要がある場合があります
-    app = TopMenu()
-    app.mainloop()
+    main()
