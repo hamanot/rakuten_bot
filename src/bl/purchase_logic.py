@@ -1,193 +1,189 @@
 import os
-import pickle
 import time
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import Select, WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+from component.chrome_driver_manager import ChromeDriverManager
 from component.user_manager import UserManager
 from component.item_manager import ItemManager
 
 
 class PurchaseLogic:
-    def __init__(self, driver, debug_mode=True):
-        self.driver = driver
+    _instance = None
+
+    @classmethod
+    def get_instance(cls, debug_mode=True):
+        if cls._instance is None:
+            cls._instance = cls(debug_mode)
+        else:
+            # 既にインスタンスがあっても、呼び出し時のモードを適用し、
+            # 常に最新の設定ファイルを読み直す
+            cls._instance.debug_mode = debug_mode
+            cls._instance._load_config()
+        return cls._instance
+
+    def __init__(self, debug_mode=True):
         self.debug_mode = debug_mode
+        self._load_config()
+
+    def _load_config(self):
+        """ItemManagerからモードに応じた最新の設定をロード。"""
+        # ItemManager内部で正しいパス導出(3段階遡り)が行われている前提
         i_mgr = ItemManager(debug_mode=self.debug_mode)
-        conf = i_mgr.load()
-        self.common = conf.get("common", {})
+        conf = i_mgr.load() or {}
+        self.common = conf.get("common") or {}
         self.item = conf.get("items", [{}])[0]
+        print(f"[CONFIG] {'DEBUG' if self.debug_mode else 'PRODUCTION'} 設定をロード完了")
 
-        current_file = os.path.abspath(__file__)
-        project_root = os.path.dirname(os.path.dirname(current_file))
-        self.cookie_path = os.path.join(project_root, "conf", "cookies_debug.pkl" if debug_mode else "cookies.pkl")
-
-    # --- ログイン・クッキー関連 ---
-    def load_cookies(self):
-        if os.path.exists(self.cookie_path):
-            try:
-                with open(self.cookie_path, "rb") as f:
-                    cookies = pickle.load(f)
-                    for cookie in cookies:
-                        self.driver.add_cookie(cookie)
-                return True
-            except:
-                return False
-        return False
-
-    def save_cookies(self):
+    def is_logged_in(self):
         try:
-            os.makedirs(os.path.dirname(self.cookie_path), exist_ok=True)
-            with open(self.cookie_path, "wb") as f:
-                pickle.dump(self.driver.get_cookies(), f)
-            return True
+            driver = ChromeDriverManager.get_driver(self.debug_mode)
+            source = driver.page_source
+            return "log-out" in source or "my-rakuten" in source
         except:
             return False
 
-    def is_logged_in(self):
-        return "log-out" in self.driver.page_source or "my-rakuten" in self.driver.page_source
-
     def execute_login(self):
+        driver = ChromeDriverManager.get_driver(self.debug_mode)
+        top_url = self.common.get("top_url") or "https://www.rakuten.co.jp/"
         login_url = self.common.get("login_url")
-        if login_url:
-            self.driver.get(login_url)
 
-        user_mgr = UserManager()
-        user = user_mgr.load()
+        print(f"[LOGIN] ログイン状態確認中... (Mode: {self.debug_mode})")
+        driver.get(top_url)
+
+        if self.is_logged_in():
+            print("[LOGIN] プロファイルによる自動ログイン成功")
+            return True
+
+        print("[LOGIN] 未ログインのため通常ログイン開始")
+        if login_url:
+            driver.get(login_url)
+
+        user = UserManager().load()
         user_id = user.get("rakuten_id")
         user_pw = user.get("rakuten_pw")
 
-        if not user_id or not user_pw:
-            print("IDまたはパスワードが設定されていません")
-            return False
-
         try:
-            wait = WebDriverWait(self.driver, 10)
+            wait = WebDriverWait(driver, 10)
             wait.until(EC.presence_of_element_located((By.ID, "loginInner_u")))
-            self.driver.find_element_by_id("loginInner_u").send_keys(user_id)
-            self.driver.find_element_by_id("loginInner_p").send_keys(user_pw)
-            self.driver.find_element_by_name("submit").click()
-            print("ログインを実行しました。")
-            return True
+            driver.find_element(By.ID, "loginInner_u").send_keys(user_id)
+            driver.find_element(By.ID, "loginInner_p").send_keys(user_pw)
+            driver.find_element(By.NAME, "submit").click()
+
+            for _ in range(300):
+                if top_url in driver.current_url or self.is_logged_in():
+                    print("[LOGIN] 成功。")
+                    time.sleep(2)
+                    return True
+                time.sleep(1)
+            return False
         except Exception as e:
-            print("ログイン失敗:", e)
+            print(f"[ERROR] ログイン失敗: {e}")
             return False
 
-    # --- 商品選択・購入操作関連 ---
-    def select_required_options(self, keywords):
-        """必須項目の選択。一つでも実行したらTrueを返す"""
-        success = False
+    def execute_cart_post(self, kw_string):
+        """fetchによるカート投入リクエスト"""
         try:
-            for sel in self.driver.find_elements_by_tag_name("select"):
-                obj = Select(sel)
-                for opt in obj.options:
-                    for kw in keywords:
-                        if kw in opt.text:
-                            obj.select_by_visible_text(opt.text)
-                            success = True
-                            break
-        except:
-            pass
-        return success
+            driver = ChromeDriverManager.get_driver(self.debug_mode)
 
-    def execute_action_set(self, action_set):
-        """
-        全アクションを実行する前に、前回のトーストを跡形もなく消す
-        """
-        # 前回のトースト、背景のオーバーレイ、モーダルをすべて削除
-        self.driver.execute_script("""
-            const junk = [
-                '.cart-common-toast', 
-                '.action-feedback', 
-                '[role="alert"]', 
-                '.modal-backdrop', 
-                '.overlay'
-            ];
-            junk.forEach(s => {
-                document.querySelectorAll(s).forEach(el => el.remove());
+            parts = kw_string.split("###")
+            if len(parts) < 3: return False
+            qty, data_part = parts[0], parts[2]
+            elements = [e.strip() for e in data_part.split("|")]
+
+            # --- ここから修正 ---
+            shopid, itemid = elements[-1], elements[-2]
+            vid = elements[0]  # elements[0] が空文字 "" なら False 扱いになる
+            choice_list = [c.strip() for c in "|".join(elements[1:-2]).split("||") if c.strip()]
+
+            post_url = self.common.get("post_url")
+            print(f"[CART_POST] リクエスト送信 (VID: {vid if vid else 'NONE'})")
+
+            # JavaScriptはそのまま (空のキーを送らないように、payload側で制御する)
+            script = """
+            const postUrl = arguments[0];
+            const payload = arguments[1];
+            const formData = new URLSearchParams();
+            for (const key in payload) {
+                if (Array.isArray(payload[key])) {
+                    payload[key].forEach(val => formData.append(key, val));
+                } else {
+                    formData.append(key, payload[key]);
+                }
+            }
+            fetch(postUrl, {
+                method: "POST",
+                body: formData,
+                mode: "no-cors",
+                credentials: "include",
+                headers: {
+                    "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"
+                }
             });
-            // 念のためbodyのoverflow制限（スクロール不可状態）も解除
-            document.body.style.overflow = 'auto';
-        """)
+            return true;
+            """
 
-        try:
-            for action in action_set:
-                n, k = action.get("target_name"), action.get("keyword")
-                if not n or not k: continue
-                if "数量" in n or "個数" in n:
-                    self._set_quantity(n, k)
-                else:
-                    self._select_by_label_and_keyword(n, k)
+            # --- ここで payload を動的に作成 ---
+            payload = {
+                "choice[]": choice_list,
+                "units": qty,
+                "itemid": itemid,
+                "shopid": shopid,
+                "device": "pc",
+                "userid": "itempage",
+                "response_encode": "utf8"
+            }
+
+            # vid が存在する場合（SKU商品）のみパラメータを追加する
+            if vid:
+                payload["variant_id"] = vid
+            # --------------------
+
+            driver.execute_script(script, post_url, payload)
+            time.sleep(0.1)
             return True
         except Exception as e:
-            print(f"DEBUG: セット実行エラー: {e}")
+            print(f"[ERROR] execute_cart_post 失敗: {e}")
             return False
 
-    def _set_quantity(self, label, val):
+    def go_to_checkout(self):
+        """設定ファイル(common.cart_url)を使用して遷移し、最速連打する。"""
+        driver = ChromeDriverManager.get_driver(self.debug_mode)
+
+        # --- 修正箇所: conf内の cart_url を使用。なければデフォルト値をセット ---
+        target_url = self.common.get("cart_url") or "https://basket.step.rakuten.co.jp/rms/mall/bs/cartall/"
+
+        fast_click_script = """
+        (function() {
+            const start = Date.now();
+            const interval = setInterval(() => {
+                if (window.self !== window.top) return;
+                if (window.location.href.indexOf('cart') === -1) return;
+
+                const buttons = Array.from(document.querySelectorAll('button, a, input'));
+                const target = buttons.find(b => 
+                    b.getAttribute('aria-label')?.includes('購入手続き') || 
+                    b.innerText?.includes('購入手続き') ||
+                    b.innerText?.includes('ご購入手続き')
+                );
+
+                if (target) {
+                    target.click();
+                    target.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                }
+                if (Date.now() - start > 10000) clearInterval(interval);
+            }, 10);
+        })();
+        """
+
+        # Selenium 3.141.0 でも execute_cdp_cmd は利用可能
         try:
-            xpath = "//*[contains(text(),'{}')]/following::input[1]".format(label)
-            el = self.driver.find_element_by_xpath(xpath)
-            el.clear()
-            el.send_keys(str(val))
-            return True
-        except:
-            return False
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": fast_click_script})
+        except Exception:
+            # 万が一CDPコマンドが失敗した場合の予備
+            print("[WARN] CDP injection failed. Falling back to standard script.")
 
-    def _select_by_label_and_keyword(self, label, kw):
-        sku_button_xpaths = [
-            "//button[@aria-label='{}']".format(kw),
-            "//button[contains(@aria-label, '{}')]".format(kw),
-            "//button//span[contains(text(), '{}')]".format(kw),
-            "//button//div[contains(text(), '{}')]".format(kw)
-        ]
-
-        for xpath in sku_button_xpaths:
-            try:
-                el = self.driver.find_element_by_xpath(xpath)
-                # スクロールさせずにJSでクリック（トーストが消えていれば貫通する）
-                self.driver.execute_script("arguments[0].click();", el)
-                return True
-            except:
-                continue
-        return False
-
-    def add_to_cart(self):
-        # 本体ボタン(size-m)に絞る
-        xpath = "//button[@aria-label='かごに追加' and contains(@class, 'size-m')]"
-
-        try:
-            # 1. カゴ入れボタンを見つける
-            btn = self.driver.find_element(By.XPATH, xpath)
-
-            # 2. ボタンが「押せる状態」になるまで最大2秒だけ待つ（実際にはコンマ数秒で終わる）
-            # disabled属性が消えるのを待つ
-            WebDriverWait(self.driver, 2).until(
-                lambda d: btn.is_enabled() and "disabled" not in btn.get_attribute("class")
-            )
-
-            # 3. 物理クリックではなくJSで「通信を直接発火」させる
-            self.driver.execute_script("arguments[0].click();", btn)
-            print("DEBUG: カゴ入れ成功")
-
-            # ★ ここでトーストを消す代わりに、通信が完了するまで「最小限」だけ待機
-            # 楽天のサーバーが「次を受けていいよ」となるためのインターバル
-            time.sleep(0.3)
-            return True
-        except:
-            print("DEBUG: ボタンが準備完了になりませんでした")
-            return False
-
-    def _backup_add_to_cart(self):
-        # バックアップも同様にスクロールなしJS実行
-        try:
-            btn = self.driver.find_element_by_xpath("//button[@aria-label='かごに追加']")
-            self.driver.execute_script("arguments[0].click();", btn)
-            return True
-        except:
-            return False
-
-    def go_to_checkout(self, url=None):
-        target_url = url if url else self.common.get("cart_url")
-        if target_url:
-            self.driver.get(target_url)
-            return True
-        return False
+        print(f"[PYTHON] 買い物かご({target_url})へ遷移中...")
+        driver.execute_script(f"window.location.href = '{target_url}';")
+        return True

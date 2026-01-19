@@ -1,17 +1,19 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
+import re
 
-# 新しいベースクラスをインポート
+# インポートパーツ
 from ui.base_sub_dialog import BaseSubDialog
+from ui.toggle_button_parts import ToggleButton
 from component.item_manager import ItemManager
 from bl.item_analysis_logic import ItemAnalysisLogic
 
 
 class ItemConfigDialog(BaseSubDialog):
     def __init__(self, parent, debug_mode=True):
-        # 1. BaseSubDialogの初期化
-        super().__init__(parent, title="商品設定 - POSTパラメータ抽出モード", size=None)
+        # 1. BaseSubDialogの初期化 (初期の高さを少し高めの600に設定)
+        super().__init__(parent, title="商品設定 - POSTパラメータ抽出モード", size="950x600")
 
         self.debug_mode = debug_mode
         self.logic = ItemAnalysisLogic(debug_mode=self.debug_mode)
@@ -30,26 +32,58 @@ class ItemConfigDialog(BaseSubDialog):
         self.common_info = {}
         self.selected_vars = {}
         self.wrap_labels = []
+        self.url_entry_widgets = []
 
         # 2. UI構築
         self._create_widgets()
 
-        # 3. 初期表示時のサイズ調整
+        # 3. サイズ調整とリサイズ許可
         self.adjust_to_content(width=950)
+        self.resizable(True, True)
+
+        # 最低サイズを設定してレイアウト崩れを防止
+        self.update_idletasks()
+        self.minsize(800, 500)
 
     def _create_widgets(self):
-        # BaseDialogの機能でスクロール領域を作成
+        # --- A. 下部ボタンエリア（最下部に固定・右寄せ） ---
+        bottom_f = ttk.Frame(self, padding="15")
+        bottom_f.pack(side="bottom", fill="x")
+
+        ttk.Separator(bottom_f, orient="horizontal").pack(fill="x", pady=(0, 15))
+
+        btn_row = ttk.Frame(bottom_f)
+        btn_row.pack(side="right")
+
+        # トレンドに合わせ キャンセル -> 保存 の順
+        ttk.Button(btn_row, text="キャンセル", width=15, command=self.close_dialog).pack(side="left", padx=5)
+        ttk.Button(btn_row, text="保存", width=15, command=self._save).pack(side="left", padx=5)
+
+        # --- B. スクロール可能なメインエリア ---
         self.scroll_f = self.create_scrollable_container()
 
         # --- 1. 楽天共通設定 ---
         common_f = ttk.LabelFrame(self.scroll_f, text=" 楽天共通設定 ", padding="10")
         common_f.pack(fill="x", pady=(5, 5), padx=15)
 
-        for label, key in [("ログインURL:", "login_url"), ("POST先URL:", "post_url"), ("購入完了URL:", "complete_url")]:
+        toggle_row = ttk.Frame(common_f)
+        toggle_row.pack(anchor="e", pady=(0, 5))
+        ttk.Label(toggle_row, text="編集許可 ").pack(side="left")
+
+        self.edit_mode_var = tk.BooleanVar(value=False)
+        self.edit_switch = ToggleButton(toggle_row, self.edit_mode_var, command=self._toggle_url_lock)
+        self.edit_switch.pack(side="left")
+
+        configs = [("楽天TOP URL:", "top_url"), ("ログインURL:", "login_url"),
+                   ("POST先URL:", "post_url"), ("カートURL:", "cart_url")]
+
+        for label, key in configs:
             ttk.Label(common_f, text=label).pack(anchor="w")
             var = tk.StringVar(value=self.current_data["common"].get(key, ""))
             setattr(self, f"{key}_var", var)
-            ttk.Entry(common_f, textvariable=var).pack(fill="x", pady=(0, 5))
+            ent = tk.Entry(common_f, textvariable=var, state="readonly", readonlybackground="#f0f0f0", font=("", 10))
+            ent.pack(fill="x", pady=(0, 8), ipady=3)
+            self.url_entry_widgets.append(ent)
 
         # --- 2. 基本注文設定 ---
         base_f = ttk.LabelFrame(self.scroll_f, text=" 基本注文設定 ", padding="10")
@@ -58,7 +92,7 @@ class ItemConfigDialog(BaseSubDialog):
         url_row = ttk.Frame(base_f)
         url_row.pack(fill="x", pady=(0, 5))
         self.url_var = tk.StringVar(value=self.item_data.get("item_url", ""))
-        ttk.Entry(url_row, textvariable=self.url_var).pack(side="left", fill="x", expand=True)
+        ttk.Entry(url_row, textvariable=self.url_var).pack(side="left", fill="x", expand=True, ipady=3)
         ttk.Button(url_row, text="解析実行", width=12, command=self._start_load_thread).pack(side="right", padx=5)
 
         # --- 3. 解析結果 ---
@@ -76,47 +110,48 @@ class ItemConfigDialog(BaseSubDialog):
         self.kw_list_f = ttk.Frame(self.kw_main_f)
         self.kw_list_f.pack(fill="x")
 
-        # 既存データの復元
         for kw in self.item_data.get("required_keywords", []):
             self._add_post_row_from_string(kw)
 
-        # 保存/キャンセルボタン
-        btn_area = ttk.Frame(self.scroll_f)
-        btn_area.pack(pady=20)
-        ttk.Button(btn_area, text="保存", width=15, command=self._save).pack(side="left", padx=10)
-        ttk.Button(btn_area, text="キャンセル", width=15, command=self.close_dialog).pack(side="left", padx=10)
+    # --- 以下ロジック部分は変更なし ---
+    def _toggle_url_lock(self):
+        is_edit = self.edit_mode_var.get()
+        state = "normal" if is_edit else "readonly"
+        for ent in self.url_entry_widgets:
+            ent.config(state=state, bg="#ffffff" if is_edit else "#f0f0f0")
 
     def _reflect_variants(self, data):
-        """解析結果を画面に反映（ここで動的にサイズが変わる）"""
         for child in self.dynamic_container.winfo_children():
             child.destroy()
         self.wrap_labels = []
-
         self.sku_groups = data.get('groups', [])
         self.sku_map = data.get('skuMap', {})
         self.common_info = data.get('common', {})
         self.selected_vars = {}
 
-        if not self.sku_groups:
-            ttk.Label(self.dynamic_container, text="❌ 項目が見つかりませんでした", foreground="red").pack(pady=10)
-            self.adjust_to_content(width=950)
-            return
+        f_name = ttk.LabelFrame(self.dynamic_container, text=" 商品名 ", padding=10)
+        f_name.pack(fill="x", pady=5, padx=5)
+        item_title = self.common_info.get('title', '商品名が取得できませんでした')
+        lbl_name = tk.Label(f_name, text=item_title, font=("", 10, "bold"), anchor="w", justify="left", wraplength=850)
+        lbl_name.pack(fill="x", padx=5)
+        self.wrap_labels.append(lbl_name)
 
-        # SKU項目の生成
+        f_var = ttk.LabelFrame(self.dynamic_container, text=" 商品バリエーション ", padding=10)
+        f_var.pack(fill="x", pady=5, padx=5)
+
         sku_gs = [g for g in self.sku_groups if g.get('type') == 'sku']
-        if sku_gs:
-            f_sku = ttk.LabelFrame(self.dynamic_container, text=" 商品バリエーション ", padding=10)
-            f_sku.pack(fill="x", pady=5, padx=5)
+        if not sku_gs:
+            ttk.Label(f_var, text="※この商品はオプション選択がありません。", foreground="blue").pack(anchor="w", padx=5)
+        else:
             for g in sku_gs:
-                self._create_combo_item(f_sku, g)
+                self._create_combo_item(f_var, g)
 
-            qty_row = ttk.Frame(f_sku)
-            qty_row.pack(fill="x", pady=(10, 5), padx=5)
-            ttk.Label(qty_row, text="購入数量:").pack(side="left")
-            self.qty_var = tk.StringVar(value="1")
-            ttk.Entry(qty_row, textvariable=self.qty_var, width=8).pack(side="left", padx=5)
+        qty_row = ttk.Frame(f_var)
+        qty_row.pack(fill="x", pady=(10, 5), padx=5)
+        ttk.Label(qty_row, text="購入数量:").pack(side="left")
+        self.qty_var = tk.StringVar(value="1")
+        ttk.Entry(qty_row, textvariable=self.qty_var, width=8).pack(side="left", padx=5)
 
-        # 選択項目の生成
         choice_gs = [g for g in self.sku_groups if g.get('type') == 'choice']
         if choice_gs:
             f_choice = ttk.LabelFrame(self.dynamic_container, text=" 確認事項（了承事項） ", padding=10)
@@ -126,8 +161,6 @@ class ItemConfigDialog(BaseSubDialog):
 
         ttk.Button(self.dynamic_container, text="この構成で登録済みPOSTセットに追加",
                    command=self._add_selected_combination, width=45).pack(pady=15)
-
-        # 重要：動的に中身が増えたので、BaseDialogの機能でサイズを再調整する
         self.adjust_to_content(width=950)
         self.status_var.set(f"✅ 解析完了: {len(self.sku_groups)} 項目")
 
@@ -148,63 +181,66 @@ class ItemConfigDialog(BaseSubDialog):
         sku_vals = []
         choice_vals = []
         choice_pairs = []
-
+        sku_gs = [g for g in self.sku_groups if g.get('type') == 'sku']
         for g in self.sku_groups:
-            val = self.selected_vars[g['id']].get().strip()
+            var = self.selected_vars.get(g['id'])
+            if not var: continue
+            val = var.get().strip()
             if not val: return
-
             if g.get('type') == 'sku':
                 sku_vals.append(val)
             else:
                 choice_vals.append(val)
                 choice_pairs.append(f"{g['name']}:{val}")
-
-        key = ",".join(sku_vals)
-        sku_info = self.sku_map.get(key)
-        vid = sku_info.get('vid') if isinstance(sku_info, dict) else str(sku_info)
-
-        if vid:
-            try:
-                add_qty = int(self.qty_var.get())
-            except:
-                add_qty = 1
-
-            if vid in self.post_rows:
-                current_qty = int(self.post_rows[vid]["qty_var"].get())
-                self.post_rows[vid]["qty_var"].set(str(current_qty + add_qty))
+        vid = None
+        if sku_gs:
+            key = ",".join(sku_vals)
+            sku_info = self.sku_map.get(key)
+            if sku_info:
+                vid = sku_info.get('vid') if isinstance(sku_info, dict) else str(sku_info)
             else:
-                display_text = " ・ ".join(sku_vals + choice_vals).replace('\n', ' ')
-                choices_str = "||".join(choice_pairs)
-                post_data = f"{vid}|{choices_str}|{self.common_info.get('itemid', '')}|{self.common_info.get('shopid', '')}"
-                self._create_post_row_ui(vid, display_text, post_data, add_qty)
-
-            self.status_var.set(f"✅ セットを追加/更新しました")
-            self.adjust_to_content(width=950)
+                vid = self.common_info.get('vid')
         else:
-            messagebox.showerror("エラー", "SKU IDの特定に失敗しました。")
+            vid = None
+        clean_vid = str(vid) if vid else ""
+        item_id = self.common_info.get('itemid', '')
+        row_key = clean_vid if clean_vid else f"item_{item_id}"
+        try:
+            add_qty = int(self.qty_var.get())
+        except:
+            add_qty = 1
+        if row_key in self.post_rows:
+            current_qty = int(self.post_rows[row_key]["qty_var"].get())
+            self.post_rows[row_key]["qty_var"].set(str(current_qty + add_qty))
+        else:
+            item_title = self.common_info.get('title', '単品商品')
+            extra_parts = sku_vals + choice_vals
+            if extra_parts:
+                detail_text = " ・ ".join(extra_parts).replace('\n', ' ')
+                display_text = f"{item_title} ({detail_text})"
+            else:
+                display_text = item_title
+            choices_str = "||".join(choice_pairs)
+            post_data = f"{clean_vid}|{choices_str}|{item_id}|{self.common_info.get('shopid', '')}"
+            self._create_post_row_ui(row_key, display_text, post_data, add_qty)
+        self.status_var.set(f"✅ セットを追加しました")
+        self.adjust_to_content(width=950)
 
     def _create_post_row_ui(self, vid, display_text, post_data, qty):
         row = ttk.Frame(self.kw_list_f)
         row.pack(fill="x", pady=2)
         qty_var = tk.StringVar(value=str(qty))
-
-        lbl = tk.Label(row, text=display_text, font=("", 9), anchor="w", justify="left", wraplength=800)
-        lbl.pack(side="left", padx=5, fill="x", expand=True)
-        self.wrap_labels.append(lbl)
-
         ctrl_f = ttk.Frame(row)
-        ctrl_f.pack(side="right")
+        ctrl_f.pack(side="right", padx=5)
         ttk.Button(ctrl_f, text="－", width=3, command=lambda: self._change_qty(vid, -1)).pack(side="left")
         ttk.Entry(ctrl_f, textvariable=qty_var, width=5, justify="center").pack(side="left", padx=2)
         ttk.Button(ctrl_f, text="＋", width=3, command=lambda: self._change_qty(vid, 1)).pack(side="left")
         ttk.Button(ctrl_f, text="×", width=3, command=lambda: self._remove_row(vid)).pack(side="left", padx=5)
-
-        self.post_rows[vid] = {
-            "row_frame": row,
-            "qty_var": qty_var,
-            "display_text": display_text,
-            "post_data": post_data
-        }
+        lbl = tk.Label(row, text=display_text, font=("", 9), anchor="w", justify="left", wraplength=700)
+        lbl.pack(side="left", padx=5, fill="x", expand=True)
+        self.wrap_labels.append(lbl)
+        self.post_rows[vid] = {"row_frame": row, "qty_var": qty_var, "display_text": display_text,
+                               "post_data": post_data}
 
     def _change_qty(self, vid, delta):
         try:
@@ -223,8 +259,8 @@ class ItemConfigDialog(BaseSubDialog):
             parts = raw_str.split("###")
             if len(parts) == 3:
                 qty, display, p_data = parts
-                vid = p_data.split("|")[0]
-                self._create_post_row_ui(vid, display, p_data, qty)
+                vid_part = p_data.split("|")[0]
+                self._create_post_row_ui(vid_part if vid_part else f"init_{qty}", display, p_data, qty)
 
     def _start_load_thread(self):
         url = self.url_var.get().strip()
@@ -240,22 +276,16 @@ class ItemConfigDialog(BaseSubDialog):
             self.after(0, lambda e=err: self.status_var.set(f"❌ 失敗: {e}"))
 
     def _save(self):
-        self.current_data["common"]["login_url"] = self.login_url_var.get().strip()
-        self.current_data["common"]["post_url"] = self.post_url_var.get().strip()
-        self.current_data["common"]["complete_url"] = self.complete_url_var.get().strip()
+        self.current_data["common"].update(
+            {"top_url": self.top_url_var.get().strip(), "login_url": self.login_url_var.get().strip(),
+             "post_url": self.post_url_var.get().strip(), "cart_url": self.cart_url_var.get().strip()})
         self.item_data["item_url"] = self.url_var.get().strip()
-
-        save_list = []
-        for vid, row in self.post_rows.items():
-            save_list.append(f"{row['qty_var'].get()}###{row['display_text']}###{row['post_data']}")
-        self.item_data["required_keywords"] = save_list
-
+        self.item_data["required_keywords"] = [f"{r['qty_var'].get()}###{r['display_text']}###{r['post_data']}" for r in
+                                               self.post_rows.values()]
         if self.manager.save(self.current_data):
             messagebox.showinfo("保存", "設定を保存しました。")
             self.close_dialog()
 
     def close_dialog(self):
-        if hasattr(self, 'logic') and self.logic:
-            self.logic.close()
-        # BaseSubDialogの終了処理を呼ぶ
+        if hasattr(self, 'logic') and self.logic: self.logic.close()
         super().close_dialog()

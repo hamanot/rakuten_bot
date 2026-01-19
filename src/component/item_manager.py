@@ -9,12 +9,11 @@ class ItemManager:
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
 
         self.conf_dir = os.path.join(project_root, "conf")
-        # デバッグモードを判定してファイル名を決定
         filename = "item_info_debug.json" if self.debug_mode else "item_info.json"
         self.file_path = os.path.join(self.conf_dir, filename)
 
         self.item_data = {
-            "common": {"top_url": "", "login_url": "", "cart_url": ""},
+            "common": {"top_url": "", "login_url": "", "post_url": "", "cart_url": ""},
             "items": [{"item_url": "", "required_keywords": [], "actions": []}]
         }
 
@@ -28,7 +27,9 @@ class ItemManager:
 
             if "common" not in data:
                 data["common"] = self.item_data["common"]
-            for k in ["top_url", "login_url", "cart_url"]:
+
+            # 必須キーの補完 (cart_url を確実に含める)
+            for k in ["top_url", "login_url", "post_url", "cart_url"]:
                 if k not in data["common"]:
                     data["common"][k] = ""
 
@@ -57,6 +58,7 @@ class ItemManager:
         items = data.get("items", [])
         i = items[0] if items else {}
 
+        # cart_url を含む必須URLのチェック
         return all([
             c.get("top_url", "").strip(),
             c.get("login_url", "").strip(),
