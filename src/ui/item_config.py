@@ -12,7 +12,7 @@ from bl.item_analysis_logic import ItemAnalysisLogic
 
 class ItemConfigDialog(BaseSubDialog):
     def __init__(self, parent, debug_mode=True):
-        # 1. BaseSubDialogの初期化 (初期の高さを少し高めの600に設定)
+        # 1. BaseSubDialogの初期化 (サイズ固定)
         super().__init__(parent, title="商品設定 - POSTパラメータ抽出モード", size="950x600")
 
         self.debug_mode = debug_mode
@@ -46,7 +46,7 @@ class ItemConfigDialog(BaseSubDialog):
         self.minsize(800, 500)
 
     def _create_widgets(self):
-        # --- A. 下部ボタンエリア（最下部に固定・右寄せ） ---
+        # --- A. 下部ボタンエリア（最下部固定） ---
         bottom_f = ttk.Frame(self, padding="15")
         bottom_f.pack(side="bottom", fill="x")
 
@@ -55,7 +55,6 @@ class ItemConfigDialog(BaseSubDialog):
         btn_row = ttk.Frame(bottom_f)
         btn_row.pack(side="right")
 
-        # トレンドに合わせ キャンセル -> 保存 の順
         ttk.Button(btn_row, text="キャンセル", width=15, command=self.close_dialog).pack(side="left", padx=5)
         ttk.Button(btn_row, text="保存", width=15, command=self._save).pack(side="left", padx=5)
 
@@ -89,11 +88,17 @@ class ItemConfigDialog(BaseSubDialog):
         base_f = ttk.LabelFrame(self.scroll_f, text=" 基本注文設定 ", padding="10")
         base_f.pack(fill="x", pady=5, padx=15)
         ttk.Label(base_f, text="商品URL:").pack(anchor="w")
+
         url_row = ttk.Frame(base_f)
         url_row.pack(fill="x", pady=(0, 5))
+
         self.url_var = tk.StringVar(value=self.item_data.get("item_url", ""))
-        ttk.Entry(url_row, textvariable=self.url_var).pack(side="left", fill="x", expand=True, ipady=3)
-        ttk.Button(url_row, text="解析実行", width=12, command=self._start_load_thread).pack(side="right", padx=5)
+        # UIロック用に参照保持
+        self.url_entry = ttk.Entry(url_row, textvariable=self.url_var)
+        self.url_entry.pack(side="left", fill="x", expand=True, ipady=3)
+
+        self.analyze_btn = ttk.Button(url_row, text="解析実行", width=12, command=self._start_load_thread)
+        self.analyze_btn.pack(side="right", padx=5)
 
         # --- 3. 解析結果 ---
         self.analysis_main_f = ttk.LabelFrame(self.scroll_f, text=" 解析結果の選択 ", padding="10")
@@ -113,12 +118,44 @@ class ItemConfigDialog(BaseSubDialog):
         for kw in self.item_data.get("required_keywords", []):
             self._add_post_row_from_string(kw)
 
-    # --- 以下ロジック部分は変更なし ---
     def _toggle_url_lock(self):
         is_edit = self.edit_mode_var.get()
         state = "normal" if is_edit else "readonly"
         for ent in self.url_entry_widgets:
             ent.config(state=state, bg="#ffffff" if is_edit else "#f0f0f0")
+
+    def _start_load_thread(self):
+        url = self.url_var.get().strip()
+        if not url: return
+
+        # UIロック：解析中はボタンと入力を無効化
+        self.status_var.set("⏳ 解析中（ヘッドレスブラウザ起動中）...")
+        self.analyze_btn.config(state="disabled")
+        self.url_entry.config(state="disabled")
+
+        threading.Thread(target=self._load_task, args=(url,), daemon=True).start()
+
+    def _load_task(self, url):
+        try:
+            # 解析実行（ヘッドレス）
+            data = self.logic.fetch_item_variants(url)
+            # 解析完了後に即座にブラウザを破棄
+            self.logic.close()
+
+            self.after(0, lambda: self._on_load_success(data))
+        except Exception as err:
+            self.logic.close()
+            self.after(0, lambda e=err: self._on_load_error(e))
+
+    def _on_load_success(self, data):
+        self.analyze_btn.config(state="normal")
+        self.url_entry.config(state="normal")
+        self._reflect_variants(data)
+
+    def _on_load_error(self, err):
+        self.analyze_btn.config(state="normal")
+        self.url_entry.config(state="normal")
+        self.status_var.set(f"❌ 失敗: {err}")
 
     def _reflect_variants(self, data):
         for child in self.dynamic_container.winfo_children():
@@ -192,6 +229,7 @@ class ItemConfigDialog(BaseSubDialog):
             else:
                 choice_vals.append(val)
                 choice_pairs.append(f"{g['name']}:{val}")
+
         vid = None
         if sku_gs:
             key = ",".join(sku_vals)
@@ -200,29 +238,29 @@ class ItemConfigDialog(BaseSubDialog):
                 vid = sku_info.get('vid') if isinstance(sku_info, dict) else str(sku_info)
             else:
                 vid = self.common_info.get('vid')
-        else:
-            vid = None
+
         clean_vid = str(vid) if vid else ""
         item_id = self.common_info.get('itemid', '')
         row_key = clean_vid if clean_vid else f"item_{item_id}"
+
         try:
             add_qty = int(self.qty_var.get())
         except:
             add_qty = 1
+
         if row_key in self.post_rows:
             current_qty = int(self.post_rows[row_key]["qty_var"].get())
             self.post_rows[row_key]["qty_var"].set(str(current_qty + add_qty))
         else:
             item_title = self.common_info.get('title', '単品商品')
             extra_parts = sku_vals + choice_vals
-            if extra_parts:
-                detail_text = " ・ ".join(extra_parts).replace('\n', ' ')
-                display_text = f"{item_title} ({detail_text})"
-            else:
-                display_text = item_title
+            detail_text = " ・ ".join(extra_parts).replace('\n', ' ') if extra_parts else ""
+            display_text = f"{item_title} ({detail_text})" if detail_text else item_title
+
             choices_str = "||".join(choice_pairs)
             post_data = f"{clean_vid}|{choices_str}|{item_id}|{self.common_info.get('shopid', '')}"
             self._create_post_row_ui(row_key, display_text, post_data, add_qty)
+
         self.status_var.set(f"✅ セットを追加しました")
         self.adjust_to_content(width=950)
 
@@ -232,10 +270,11 @@ class ItemConfigDialog(BaseSubDialog):
         qty_var = tk.StringVar(value=str(qty))
         ctrl_f = ttk.Frame(row)
         ctrl_f.pack(side="right", padx=5)
-        ttk.Button(ctrl_f, text="－", width=3, command=lambda: self._change_qty(vid, -1)).pack(side="left")
+        ttk.Button(ctrl_f, text="－", width=3, command=lambda v=vid: self._change_qty(v, -1)).pack(side="left")
         ttk.Entry(ctrl_f, textvariable=qty_var, width=5, justify="center").pack(side="left", padx=2)
-        ttk.Button(ctrl_f, text="＋", width=3, command=lambda: self._change_qty(vid, 1)).pack(side="left")
-        ttk.Button(ctrl_f, text="×", width=3, command=lambda: self._remove_row(vid)).pack(side="left", padx=5)
+        ttk.Button(ctrl_f, text="＋", width=3, command=lambda v=vid: self._change_qty(v, 1)).pack(side="left")
+        ttk.Button(ctrl_f, text="×", width=3, command=lambda v=vid: self._remove_row(v)).pack(side="left", padx=5)
+
         lbl = tk.Label(row, text=display_text, font=("", 9), anchor="w", justify="left", wraplength=700)
         lbl.pack(side="left", padx=5, fill="x", expand=True)
         self.wrap_labels.append(lbl)
@@ -262,30 +301,23 @@ class ItemConfigDialog(BaseSubDialog):
                 vid_part = p_data.split("|")[0]
                 self._create_post_row_ui(vid_part if vid_part else f"init_{qty}", display, p_data, qty)
 
-    def _start_load_thread(self):
-        url = self.url_var.get().strip()
-        if not url: return
-        self.status_var.set("⏳ 解析中...")
-        threading.Thread(target=self._load_task, args=(url,), daemon=True).start()
-
-    def _load_task(self, url):
-        try:
-            data = self.logic.fetch_item_variants(url)
-            self.after(0, lambda: self._reflect_variants(data))
-        except Exception as err:
-            self.after(0, lambda e=err: self.status_var.set(f"❌ 失敗: {e}"))
-
     def _save(self):
-        self.current_data["common"].update(
-            {"top_url": self.top_url_var.get().strip(), "login_url": self.login_url_var.get().strip(),
-             "post_url": self.post_url_var.get().strip(), "cart_url": self.cart_url_var.get().strip()})
+        self.current_data["common"].update({
+            "top_url": self.top_url_var.get().strip(),
+            "login_url": self.login_url_var.get().strip(),
+            "post_url": self.post_url_var.get().strip(),
+            "cart_url": self.cart_url_var.get().strip()
+        })
         self.item_data["item_url"] = self.url_var.get().strip()
-        self.item_data["required_keywords"] = [f"{r['qty_var'].get()}###{r['display_text']}###{r['post_data']}" for r in
-                                               self.post_rows.values()]
+        self.item_data["required_keywords"] = [
+            f"{r['qty_var'].get()}###{r['display_text']}###{r['post_data']}" for r in self.post_rows.values()
+        ]
         if self.manager.save(self.current_data):
             messagebox.showinfo("保存", "設定を保存しました。")
             self.close_dialog()
 
     def close_dialog(self):
-        if hasattr(self, 'logic') and self.logic: self.logic.close()
+        # 閉じるときに確実にブラウザを破棄
+        if hasattr(self, 'logic') and self.logic:
+            self.logic.close()
         super().close_dialog()

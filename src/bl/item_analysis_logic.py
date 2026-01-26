@@ -12,7 +12,9 @@ class ItemAnalysisLogic:
         self.debug_mode = debug_mode
 
     def fetch_item_variants(self, url):
-        driver = ChromeDriverManager.get_driver()
+        # 【修正】is_headless=True を指定して取得（マネージャー側で再起動が走る）
+        # ※デバッグモード設定も引き継ぐ
+        driver = ChromeDriverManager.get_driver(is_debug_mode=self.debug_mode, is_headless=True)
         driver.get(url)
 
         try:
@@ -23,7 +25,7 @@ class ItemAnalysisLogic:
         except:
             pass
 
-        # --- JavaScript 解析ロジック (解析・ログ出力ともに完全維持) ---
+        # --- JavaScript 解析ロジック (完全維持) ---
         script = """
         var res = { groups: [], skuMap: {}, common: {}, debug: { log: [] } };
         function addLog(msg) { res.debug.log.push(msg); }
@@ -40,7 +42,6 @@ class ItemAnalysisLogic:
                 res.common.shopid = (d.shopId || "").toString();
             }
 
-            // 【核心】変な数字の出処をログに残す
             var htmlSnippet = document.body.innerHTML;
             var m = htmlSnippet.match(/compass_sku_(\\d+)_/);
             var skuPrefix = "";
@@ -119,10 +120,6 @@ class ItemAnalysisLogic:
         return payload
 
     def close(self):
-        # 【修正】シングルトンから「今あるインスタンス」だけをチェックして閉じる
-        try:
-            if hasattr(ChromeDriverManager, '_driver') and ChromeDriverManager._driver:
-                ChromeDriverManager._driver.quit()
-                ChromeDriverManager._driver = None
-        except:
-            pass
+        # 【修正】マネージャーの正しい quit_driver を呼び出す
+        # マネージャー内で _instance = None まで完結しているため、これだけでOK
+        ChromeDriverManager.quit_driver()
